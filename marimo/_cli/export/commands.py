@@ -834,6 +834,45 @@ def pdf(
     )
 
 
+def _copy_lazy_caches_to_export(
+    marimo_file: MarimoPath, out_dir: Path
+) -> None:
+    """Bundle lazy caches written by an executed export into the out dir.
+
+    The default LazyStore writes caches to __marimo__/cache/ and kernel
+    teardown records an export manifest of exactly the keys this session
+    produced. After `--execute` runs the app, copy those files straight
+    into `<out_dir>/public/cache/`, where the WASM store's HTTP fallback
+    fetches them. Copying into the export (rather than the notebook's
+    public/ folder) avoids both polluting the source tree and the
+    ordering constraint with `export_public_folder`, which runs before
+    the app executes.
+    """
+    import json
+    import shutil
+
+    from marimo._utils.paths import notebook_output_dir
+
+    notebook_path = Path(marimo_file.absolute_name)
+    cache_src = notebook_output_dir(notebook_path.parent) / "cache"
+    manifest_file = cache_src / ".lazy_export_manifest.json"
+    if not manifest_file.exists():
+        echo("No lazy caches to bundle.")
+        return
+    keys: list[str] = json.loads(manifest_file.read_text())
+    cache_dst = out_dir / "public" / "cache"
+    copied = 0
+    for key in keys:
+        src_file = cache_src / key
+        if src_file.exists():
+            dst_file = cache_dst / key
+            dst_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_file, dst_file)
+            copied += 1
+    manifest_file.unlink()
+    echo(f"Bundled {copied} lazy cache files into {cache_dst}.")
+
+
 @click.command(
     cls=ColoredCommand,
     help="""Export a notebook as a WASM-powered standalone HTML file.
@@ -1042,9 +1081,11 @@ def html_wasm(
         create_cloudflare_files(parse_title(name), out_dir)
 
     outfile = out_dir / filename
-    return watch_and_export(
-        MarimoPath(name), outfile, watch, export_callback, force
-    )
+    watch_and_export(MarimoPath(name), outfile, watch, export_callback, force)
+    if execute and not watch:
+        # The executed session's LazyLoader manifest (written at kernel
+        # teardown) lists the cache files to ship with the export.
+        _copy_lazy_caches_to_export(marimo_file, out_dir)
 
 
 export.add_command(html)
